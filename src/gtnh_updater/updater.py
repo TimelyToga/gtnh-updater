@@ -39,6 +39,12 @@ class GTNHUpdater:
     # Config file that needs special handling (copied alongside shaderpacks)
     SHADER_CONFIG = "config/shaders.properties"
 
+    # Config folders to merge (preserves user customizations while adding new options)
+    CONFIG_FOLDERS_TO_MERGE = [
+        "config",
+        "serverutilities",
+    ]
+
     class ConfigConflictError(Exception):
         """Raised when config merge has unresolved conflicts."""
 
@@ -334,8 +340,6 @@ class GTNHUpdater:
 
         config_repo = new_instance / ".updater_config_repo"
         old_config_repo = old_instance / ".updater_config_repo"
-        old_config = old_instance / "config"
-        new_config = new_instance / "config"
 
         # Check if old instance has an existing config repo from previous updates
         if old_config_repo.exists() and (old_config_repo / ".git").exists():
@@ -343,15 +347,15 @@ class GTNHUpdater:
             # Copy the existing repo to the new instance
             shutil.copytree(old_config_repo, config_repo)
             # Update with current user configs (in case they made changes since last update)
-            self._update_config_repo_with_current(config_repo, old_config)
+            self._update_config_repo_with_current(config_repo, old_instance)
             # Add new version configs and merge
-            self._add_new_version_and_merge(config_repo, new_config, state)
+            self._add_new_version_and_merge(config_repo, new_instance, state)
             # Copy merged configs back to new instance
             self._finish_config_merge(config_repo, new_instance)
         else:
             # Fresh start - create new repo
-            self._init_config_repo(config_repo, new_config)
-            self._setup_old_config_branch(config_repo, old_config)
+            self._init_config_repo(config_repo, new_instance)
+            self._setup_old_config_branch(config_repo, old_instance)
             conflicts = self._attempt_config_merge(config_repo)
 
             if conflicts:
@@ -365,14 +369,16 @@ class GTNHUpdater:
             # No conflicts, copy merged configs back
             self._finish_config_merge(config_repo, new_instance)
 
-    def _update_config_repo_with_current(self, repo_path: Path, current_config: Path) -> None:
+    def _update_config_repo_with_current(self, repo_path: Path, old_instance: Path) -> None:
         """Update the config repo with the user's current config state."""
-        config_dest = repo_path / "config"
-
-        # Remove old configs and copy current ones
-        if config_dest.exists():
-            shutil.rmtree(config_dest)
-        shutil.copytree(current_config, config_dest)
+        # Copy all config folders from old instance
+        for folder in self.CONFIG_FOLDERS_TO_MERGE:
+            source = old_instance / folder
+            dest = repo_path / folder
+            if source.exists():
+                if dest.exists():
+                    shutil.rmtree(dest)
+                shutil.copytree(source, dest)
 
         # Commit any changes the user made since last update
         self._run_git(repo_path, ["add", "."])
@@ -382,16 +388,19 @@ class GTNHUpdater:
             # No changes to commit, that's fine
             pass
 
-    def _add_new_version_and_merge(self, repo_path: Path, new_config: Path, state: UpdateState) -> None:
+    def _add_new_version_and_merge(self, repo_path: Path, new_instance: Path, state: UpdateState) -> None:
         """Add new version configs to repo and merge."""
-        config_dest = repo_path / "config"
-
         # Create a branch for the new version
         self._run_git(repo_path, ["checkout", "-b", "new-version"])
 
-        # Replace configs with new version
-        shutil.rmtree(config_dest)
-        shutil.copytree(new_config, config_dest)
+        # Replace all config folders with new version
+        for folder in self.CONFIG_FOLDERS_TO_MERGE:
+            source = new_instance / folder
+            dest = repo_path / folder
+            if source.exists():
+                if dest.exists():
+                    shutil.rmtree(dest)
+                shutil.copytree(source, dest)
 
         self._run_git(repo_path, ["add", "."])
         self._run_git(repo_path, ["commit", "-m", "New version configs"])
@@ -407,7 +416,7 @@ class GTNHUpdater:
                     "-m", "Merge new version configs",
                     "--no-edit",
                     "--allow-unrelated-histories",
-                    "-X", "theirs",
+                    "-X", "ours",
                 ],
             )
         except subprocess.CalledProcessError:
@@ -441,13 +450,16 @@ class GTNHUpdater:
         except (subprocess.CalledProcessError, FileNotFoundError):
             return False
 
-    def _init_config_repo(self, repo_path: Path, new_config: Path) -> None:
+    def _init_config_repo(self, repo_path: Path, new_instance: Path) -> None:
         """Initialize a git repo with the new configs."""
         repo_path.mkdir(parents=True, exist_ok=True)
 
-        # Copy new configs to repo
-        config_dest = repo_path / "config"
-        shutil.copytree(new_config, config_dest)
+        # Copy all config folders from new instance to repo
+        for folder in self.CONFIG_FOLDERS_TO_MERGE:
+            source = new_instance / folder
+            dest = repo_path / folder
+            if source.exists():
+                shutil.copytree(source, dest)
 
         # Initialize git
         self._run_git(repo_path, ["init"])
@@ -457,19 +469,22 @@ class GTNHUpdater:
         self._run_git(repo_path, ["commit", "-m", "New version configs"])
         self._run_git(repo_path, ["branch", "-M", "new-version"])
 
-    def _setup_old_config_branch(self, repo_path: Path, old_config: Path) -> None:
+    def _setup_old_config_branch(self, repo_path: Path, old_instance: Path) -> None:
         """Create a branch with old configs for merging."""
-        config_dest = repo_path / "config"
-
         # Create orphan branch for old configs
         self._run_git(repo_path, ["checkout", "--orphan", "old-version"])
 
         # Remove staged files
         self._run_git(repo_path, ["rm", "-rf", "--cached", "."])
 
-        # Remove config dir and replace with old configs
-        shutil.rmtree(config_dest)
-        shutil.copytree(old_config, config_dest)
+        # Remove config folders and replace with old instance's configs
+        for folder in self.CONFIG_FOLDERS_TO_MERGE:
+            source = old_instance / folder
+            dest = repo_path / folder
+            if dest.exists():
+                shutil.rmtree(dest)
+            if source.exists():
+                shutil.copytree(source, dest)
 
         self._run_git(repo_path, ["add", "."])
         self._run_git(repo_path, ["commit", "-m", "Old version configs with user customizations"])
@@ -479,9 +494,10 @@ class GTNHUpdater:
         try:
             # Merge new-version into old-version (current branch)
             # --allow-unrelated-histories: needed because we use orphan branches
-            # -X theirs: when there's a conflict, prefer the new version
-            #            (user can always re-apply their changes, but new config
-            #            changes are likely important for the new version to work)
+            # -X ours: when there's a conflict, prefer the user's customizations
+            #          (new-only files are still added, but existing files keep
+            #          user changes; if new version requires specific config
+            #          changes, they'll be in release notes)
             self._run_git(
                 repo_path,
                 [
@@ -489,7 +505,7 @@ class GTNHUpdater:
                     "-m", "Merge new version configs",
                     "--no-edit",
                     "--allow-unrelated-histories",
-                    "-X", "theirs",
+                    "-X", "ours",
                 ],
             )
             # Clean up new-version branch
@@ -540,13 +556,14 @@ class GTNHUpdater:
         of user customizations so subsequent version updates can do proper
         3-way merges.
         """
-        merged_config = repo_path / "config"
-        dest_config = new_instance / "config"
-
-        # Remove new instance's config and replace with merged
-        if dest_config.exists():
-            shutil.rmtree(dest_config)
-        shutil.copytree(merged_config, dest_config)
+        # Copy all merged config folders back to new instance
+        for folder in self.CONFIG_FOLDERS_TO_MERGE:
+            merged = repo_path / folder
+            dest = new_instance / folder
+            if merged.exists():
+                if dest.exists():
+                    shutil.rmtree(dest)
+                shutil.copytree(merged, dest)
 
         self.console.print("  [green]✓[/green] Configs merged successfully")
 
