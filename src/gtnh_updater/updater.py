@@ -308,12 +308,10 @@ class GTNHUpdater:
 
             progress.advance(task)
 
-        self.console.print(f"  [dim]Copied {len(copied_items)} items[/dim]")
-
         if copied_items:
-            self.console.print(f"  [green]✓[/green] " + ", ".join(copied_items[:5]))
-            if len(copied_items) > 5:
-                self.console.print(f"    [dim]...and {len(copied_items) - 5} more[/dim]")
+            self.console.print(f"  [green]✓[/green] Copied {len(copied_items)} items:")
+            for item in copied_items:
+                self.console.print(f"    • {item}")
 
     def _merge_configs(self, old_instance: Path, new_instance: Path, state: UpdateState) -> None:
         """Merge configs using git to preserve user customizations.
