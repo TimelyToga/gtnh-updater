@@ -25,6 +25,14 @@ cd gtnh-updater
 uv sync
 ```
 
+## Downloading GTNH
+
+This tool expects the **Prism/MultiMC zip files** from the official GTNH downloads page. Download the appropriate zip for your Java version:
+
+![Prism ZIPs download options](docs/prism-zips.png)
+
+Download page: [https://www.gtnewhorizons.com/downloads/](https://www.gtnewhorizons.com/downloads/)
+
 ## Usage
 
 ### Basic Update
