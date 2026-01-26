@@ -1,0 +1,21 @@
+[project]
+name = "gtnh-updater"
+version = "0.1.0"
+description = "GTNH Version Updater - Update GT New Horizons installations between versions"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.13"
+dependencies = [
+    "typer>=0.15.0",
+    "rich>=13.9.0",
+]
+
+[project.scripts]
+gtnh-updater = "gtnh_updater.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/gtnh_updater"]
