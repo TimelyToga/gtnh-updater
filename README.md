@@ -1,8 +1,10 @@
 # GTNH Updater
 
-A command-line tool for updating [GT New Horizons](https://www.gtnewhorizons.com/) Minecraft modpack installations between versions.
+A command-line tool for updating [GT New Horizons](https://www.gtnewhorizons.com/) Minecraft modpack installations between stable releases.
 
 This tool automates the migration process described in the [GTNH Wiki](https://wiki.gtnewhorizons.com/wiki/Installing_and_Migrating), preserving your saves, configs, and other user data while properly merging configuration changes.
+
+Inspired by [gtnh-nightly-updater](https://github.com/GTNewHorizons/gtnh-nightly-updater) — if you want to live on the bleeding edge with nightly builds, check that out instead. This tool is for those who prefer stable releases without the risk of experimental breakage.
 
 ## Features
 
@@ -121,6 +123,12 @@ This means your config customizations are preserved across multiple version upda
 - Python 3.13+
 - Git (for config merging - without it, configs are simply replaced)
 - [uv](https://github.com/astral-sh/uv) package manager
+
+### Windows Notes
+
+- Git must be installed and available in PATH (install from [git-scm.com](https://git-scm.com/))
+- Default Prism Launcher instances location: `%APPDATA%\PrismLauncher\instances\`
+- If you encounter "path too long" errors, enable [long paths in Windows](https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation)
 
 ## License
 

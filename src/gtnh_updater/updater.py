@@ -427,10 +427,15 @@ class GTNHUpdater:
     def _is_git_installed(self) -> bool:
         """Check if git is available."""
         try:
+            # On Windows, use CREATE_NO_WINDOW to prevent console flash
+            kwargs = {}
+            if subprocess.sys.platform == "win32":
+                kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
             subprocess.run(
                 ["git", "--version"],
                 capture_output=True,
                 check=True,
+                **kwargs,
             )
             return True
         except (subprocess.CalledProcessError, FileNotFoundError):
@@ -496,12 +501,17 @@ class GTNHUpdater:
 
     def _get_git_conflicts(self, repo_path: Path) -> list[str]:
         """Get list of files with merge conflicts."""
+        # On Windows, use CREATE_NO_WINDOW to prevent console flash
+        kwargs = {}
+        if subprocess.sys.platform == "win32":
+            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
         try:
             result = subprocess.run(
                 ["git", "-C", str(repo_path), "diff", "--name-only", "--diff-filter=U"],
                 capture_output=True,
                 text=True,
                 check=True,
+                **kwargs,
             )
             conflicts = [line.strip() for line in result.stdout.strip().split("\n") if line.strip()]
             return conflicts
@@ -513,6 +523,7 @@ class GTNHUpdater:
                     capture_output=True,
                     text=True,
                     check=True,
+                    **kwargs,
                 )
                 conflicts = []
                 for line in result.stdout.strip().split("\n"):
@@ -542,9 +553,14 @@ class GTNHUpdater:
     def _run_git(self, repo_path: Path, args: list[str]) -> subprocess.CompletedProcess:
         """Run a git command in the specified repo."""
         cmd = ["git", "-C", str(repo_path)] + args
+        # On Windows, use CREATE_NO_WINDOW to prevent console flash
+        kwargs = {}
+        if subprocess.sys.platform == "win32":
+            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
         return subprocess.run(
             cmd,
             capture_output=True,
             text=True,
             check=True,
+            **kwargs,
         )
