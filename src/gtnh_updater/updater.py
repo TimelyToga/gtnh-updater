@@ -1,5 +1,6 @@
 """Core updater logic for GTNH version updates."""
 
+import re
 import shutil
 import subprocess
 import zipfile
@@ -14,6 +15,9 @@ from gtnh_updater.state import UpdateState
 
 class GTNHUpdater:
     """Handles the GTNH update process."""
+
+    BASELINE_BRANCH = "version-baseline"
+    NEW_VERSION_BRANCH = "new-version"
 
     # User data files/folders to copy from old instance to new instance
     # Based on GTNH wiki migration guide
@@ -174,6 +178,7 @@ class GTNHUpdater:
 
                 # Conflicts resolved, continue with the merge
                 self.console.print("[green]Conflicts resolved![/green] Continuing update...")
+                self._finalize_new_version_branch(config_repo)
                 self._finish_config_merge(config_repo, minecraft_dir)
 
         # Finalize
@@ -346,6 +351,7 @@ class GTNHUpdater:
             self.console.print("  [dim]Found existing config history, using it for merge...[/dim]")
             # Copy the existing repo to the new instance
             shutil.copytree(old_config_repo, config_repo)
+            self._run_git(config_repo, ["checkout", "old-version"])
             # Update with current user configs (in case they made changes since last update)
             self._update_config_repo_with_current(config_repo, old_instance)
             # Add new version configs and merge
@@ -375,9 +381,9 @@ class GTNHUpdater:
         for folder in self.CONFIG_FOLDERS_TO_MERGE:
             source = old_instance / folder
             dest = repo_path / folder
+            if dest.exists():
+                shutil.rmtree(dest)
             if source.exists():
-                if dest.exists():
-                    shutil.rmtree(dest)
                 shutil.copytree(source, dest)
 
         # Commit any changes the user made since last update
@@ -390,20 +396,29 @@ class GTNHUpdater:
 
     def _add_new_version_and_merge(self, repo_path: Path, new_instance: Path, state: UpdateState) -> None:
         """Add new version configs to repo and merge."""
-        # Create a branch for the new version
-        self._run_git(repo_path, ["checkout", "-b", "new-version"])
+        baseline_commit = self._find_version_baseline(repo_path)
+
+        self._run_git(repo_path, ["checkout", "old-version"])
+        self._delete_branch_if_exists(repo_path, self.NEW_VERSION_BRANCH)
+        self._run_git(repo_path, ["checkout", "-b", self.NEW_VERSION_BRANCH, baseline_commit])
 
         # Replace all config folders with new version
         for folder in self.CONFIG_FOLDERS_TO_MERGE:
             source = new_instance / folder
             dest = repo_path / folder
+            if dest.exists():
+                shutil.rmtree(dest)
             if source.exists():
-                if dest.exists():
-                    shutil.rmtree(dest)
                 shutil.copytree(source, dest)
 
         self._run_git(repo_path, ["add", "."])
-        self._run_git(repo_path, ["commit", "-m", "New version configs"])
+        try:
+            self._run_git(repo_path, ["commit", "-m", "New version configs"])
+        except subprocess.CalledProcessError:
+            # The new pack has the same configs as the previous baseline.
+            pass
+
+        new_version_commit = self._run_git(repo_path, ["rev-parse", "HEAD"]).stdout.strip()
 
         # Switch back to main branch and merge
         self._run_git(repo_path, ["checkout", "old-version"])
@@ -412,9 +427,10 @@ class GTNHUpdater:
             self._run_git(
                 repo_path,
                 [
-                    "merge", "new-version",
+                    "merge", self.NEW_VERSION_BRANCH,
                     "-m", "Merge new version configs",
                     "--no-edit",
+                    "--no-ff",
                     "--allow-unrelated-histories",
                     "-X", "ours",
                 ],
@@ -430,8 +446,182 @@ class GTNHUpdater:
                     state_file=Path(""),
                 )
 
-        # Clean up new-version branch
-        self._run_git(repo_path, ["branch", "-d", "new-version"])
+        if self._apply_new_scalar_config_changes(repo_path, baseline_commit, new_version_commit):
+            self._run_git(repo_path, ["add", "."])
+            self._run_git(repo_path, ["commit", "--amend", "--no-edit"])
+
+        self._record_version_baseline(repo_path, new_version_commit)
+        self._run_git(repo_path, ["branch", "-d", self.NEW_VERSION_BRANCH])
+
+    def _apply_new_scalar_config_changes(
+        self,
+        repo_path: Path,
+        baseline_commit: str,
+        new_version_commit: str,
+    ) -> bool:
+        """Apply non-user-edited scalar config changes that Git dropped from conflict hunks."""
+        changed_files = self._run_git(
+            repo_path,
+            [
+                "diff",
+                "--name-only",
+                baseline_commit,
+                new_version_commit,
+                "--",
+                *self.CONFIG_FOLDERS_TO_MERGE,
+            ],
+        ).stdout.splitlines()
+
+        changed = False
+        for relative_file in changed_files:
+            merged_file = repo_path / relative_file
+            if not merged_file.is_file():
+                continue
+
+            baseline_text = self._git_show_text(repo_path, baseline_commit, relative_file)
+            new_text = self._git_show_text(repo_path, new_version_commit, relative_file)
+            if baseline_text is None or new_text is None:
+                continue
+
+            try:
+                merged_text = merged_file.read_text()
+            except UnicodeDecodeError:
+                continue
+
+            updated_text = self._merge_scalar_config_text(baseline_text, new_text, merged_text)
+            if updated_text != merged_text:
+                merged_file.write_text(updated_text)
+                changed = True
+
+        return changed
+
+    def _git_show_text(self, repo_path: Path, commit: str, relative_file: str) -> Optional[str]:
+        try:
+            return self._run_git(repo_path, ["show", f"{commit}:{relative_file}"]).stdout
+        except subprocess.CalledProcessError:
+            return None
+
+    def _merge_scalar_config_text(self, baseline_text: str, new_text: str, merged_text: str) -> str:
+        baseline = self._parse_scalar_config(baseline_text)
+        new = self._parse_scalar_config(new_text)
+        merged = self._parse_scalar_config(merged_text)
+
+        merged_lines = merged_text.splitlines(keepends=True)
+        replacements: dict[int, str] = {}
+        insertions: dict[tuple[str, ...], list[str]] = {}
+
+        for key, new_setting in new["settings"].items():
+            baseline_setting = baseline["settings"].get(key)
+            merged_setting = merged["settings"].get(key)
+
+            if baseline_setting and merged_setting:
+                baseline_value = baseline_setting["value"]
+                new_value = new_setting["value"]
+                merged_value = merged_setting["value"]
+                if new_value != baseline_value and merged_value == baseline_value:
+                    replacements[merged_setting["line_index"]] = new_setting["line"]
+            elif baseline_setting is None and merged_setting is None:
+                section = key[0]
+                insertions.setdefault(section, []).append(new_setting["line"])
+
+        for line_index, line in replacements.items():
+            merged_lines[line_index] = line
+
+        section_close = merged["section_close"]
+        for section, lines in sorted(
+            insertions.items(),
+            key=lambda item: section_close.get(item[0], len(merged_lines)),
+            reverse=True,
+        ):
+            insert_at = section_close.get(section, len(merged_lines))
+            merged_lines[insert_at:insert_at] = lines
+
+        return "".join(merged_lines)
+
+    def _parse_scalar_config(self, text: str) -> dict:
+        settings = {}
+        section_close = {}
+        section_stack: list[str] = []
+        setting_pattern = re.compile(r"^([A-Z]):(.+?)=(.*)$")
+
+        for line_index, line in enumerate(text.splitlines(keepends=True)):
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+
+            if stripped.endswith("{"):
+                section_stack.append(stripped[:-1].strip())
+                continue
+
+            if stripped == "}":
+                section_close[tuple(section_stack)] = line_index
+                if section_stack:
+                    section_stack.pop()
+                continue
+
+            match = setting_pattern.match(stripped)
+            if not match:
+                continue
+
+            key = (tuple(section_stack), match.group(1), match.group(2).strip())
+            settings[key] = {
+                "value": match.group(3).strip(),
+                "line_index": line_index,
+                "line": line,
+            }
+
+        return {"settings": settings, "section_close": section_close}
+
+    def _find_version_baseline(self, repo_path: Path) -> str:
+        """Find the previous pack-default config commit for a real 3-way merge."""
+        try:
+            return self._run_git(
+                repo_path,
+                ["rev-parse", "--verify", f"refs/heads/{self.BASELINE_BRANCH}"],
+            ).stdout.strip()
+        except subprocess.CalledProcessError:
+            pass
+
+        try:
+            result = self._run_git(repo_path, ["log", "--all", "--format=%H%x00%s"])
+            for line in result.stdout.splitlines():
+                commit, _, subject = line.partition("\x00")
+                if subject == "New version configs":
+                    return commit
+        except subprocess.CalledProcessError:
+            pass
+
+        try:
+            merge_commit = self._run_git(
+                repo_path,
+                ["rev-list", "--min-parents=2", "--max-count=1", "HEAD"],
+            ).stdout.strip()
+            if merge_commit:
+                return self._run_git(repo_path, ["rev-parse", f"{merge_commit}^2"]).stdout.strip()
+        except subprocess.CalledProcessError:
+            pass
+
+        return self._run_git(repo_path, ["rev-parse", "HEAD"]).stdout.strip()
+
+    def _record_version_baseline(self, repo_path: Path, commit: str) -> None:
+        """Remember the pack-default config commit for the next update."""
+        self._run_git(repo_path, ["branch", "-f", self.BASELINE_BRANCH, commit])
+
+    def _finalize_new_version_branch(self, repo_path: Path) -> None:
+        try:
+            commit = self._run_git(repo_path, ["rev-parse", self.NEW_VERSION_BRANCH]).stdout.strip()
+        except subprocess.CalledProcessError:
+            return
+
+        self._record_version_baseline(repo_path, commit)
+        self._run_git(repo_path, ["branch", "-D", self.NEW_VERSION_BRANCH])
+
+    def _delete_branch_if_exists(self, repo_path: Path, branch: str) -> None:
+        try:
+            self._run_git(repo_path, ["rev-parse", "--verify", f"refs/heads/{branch}"])
+        except subprocess.CalledProcessError:
+            return
+        self._run_git(repo_path, ["branch", "-D", branch])
 
     def _is_git_installed(self) -> bool:
         """Check if git is available."""
@@ -467,7 +657,7 @@ class GTNHUpdater:
         self._run_git(repo_path, ["config", "user.email", "updater@localhost"])
         self._run_git(repo_path, ["add", "."])
         self._run_git(repo_path, ["commit", "-m", "New version configs"])
-        self._run_git(repo_path, ["branch", "-M", "new-version"])
+        self._run_git(repo_path, ["branch", "-M", self.NEW_VERSION_BRANCH])
 
     def _setup_old_config_branch(self, repo_path: Path, old_instance: Path) -> None:
         """Create a branch with old configs for merging."""
@@ -501,15 +691,14 @@ class GTNHUpdater:
             self._run_git(
                 repo_path,
                 [
-                    "merge", "new-version",
+                    "merge", self.NEW_VERSION_BRANCH,
                     "-m", "Merge new version configs",
                     "--no-edit",
                     "--allow-unrelated-histories",
                     "-X", "ours",
                 ],
             )
-            # Clean up new-version branch
-            self._run_git(repo_path, ["branch", "-d", "new-version"])
+            self._finalize_new_version_branch(repo_path)
             return []
         except subprocess.CalledProcessError:
             # Merge conflict - get list of conflicting files
